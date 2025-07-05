@@ -4,9 +4,11 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
 import { toast } from 'sonner'
 import { supabase } from '@/integrations/supabase/client'
-import { Shield, Database, CheckCircle } from 'lucide-react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Shield, Database, CheckCircle, Search, AlertTriangle, ExternalLink } from 'lucide-react'
 
 export default function Admin() {
   const [statement, setStatement] = useState('')
@@ -14,6 +16,47 @@ export default function Admin() {
   const [sourceUrl, setSourceUrl] = useState('')
   const [statementDate, setStatementDate] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [verificationResults, setVerificationResults] = useState<any>({})
+  
+  const queryClient = useQueryClient()
+
+  // Query to fetch existing statements
+  const { data: statements, isLoading: statementsLoading } = useQuery({
+    queryKey: ['statements'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('veritas_chain')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(10)
+      
+      if (error) throw error
+      return data
+    }
+  })
+
+  // Mutation for verifying statements
+  const verifyMutation = useMutation({
+    mutationFn: async (statementId: string) => {
+      const { data, error } = await supabase.functions.invoke('verify-statement', {
+        body: { statementId }
+      })
+      
+      if (error) throw error
+      return data
+    },
+    onSuccess: (data) => {
+      setVerificationResults(prev => ({
+        ...prev,
+        [data.statementId]: data.verification
+      }))
+      toast.success('Statement verification completed!')
+    },
+    onError: (error) => {
+      console.error('Verification error:', error)
+      toast.error('Failed to verify statement')
+    }
+  })
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -49,6 +92,9 @@ export default function Admin() {
       setSpeaker('')
       setSourceUrl('')
       setStatementDate('')
+
+      // Refresh statements list
+      queryClient.invalidateQueries({ queryKey: ['statements'] })
 
     } catch (error) {
       console.error('Submit error:', error)
@@ -153,6 +199,110 @@ export default function Admin() {
                 )}
               </Button>
             </form>
+          </CardContent>
+        </Card>
+
+        {/* Statement Verification Section */}
+        <Card className="shadow-lg mt-8">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Search className="h-5 w-5" />
+              Fact Verification Pipeline
+            </CardTitle>
+            <CardDescription>
+              Use AI to verify the accuracy of existing statements in the Veritas chain.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {statementsLoading ? (
+              <div className="text-center py-8 text-muted-foreground">
+                Loading statements...
+              </div>
+            ) : statements && statements.length > 0 ? (
+              <div className="space-y-4">
+                {statements.map((stmt) => (
+                  <div key={stmt.id} className="border rounded-lg p-4 space-y-3">
+                    <div className="flex justify-between items-start gap-4">
+                      <div className="flex-1">
+                        <p className="font-medium text-sm">"{stmt.statement}"</p>
+                        <p className="text-sm text-muted-foreground mt-1">
+                          — {stmt.speaker} {stmt.statement_date && `(${stmt.statement_date})`}
+                        </p>
+                        {stmt.source_url && (
+                          <a 
+                            href={stmt.source_url} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-1"
+                          >
+                            <ExternalLink className="h-3 w-3" />
+                            Source
+                          </a>
+                        )}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => verifyMutation.mutate(stmt.id)}
+                        disabled={verifyMutation.isPending}
+                      >
+                        {verifyMutation.isPending && verifyMutation.variables === stmt.id ? (
+                          <>
+                            <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-primary mr-1" />
+                            Verifying...
+                          </>
+                        ) : (
+                          <>
+                            <AlertTriangle className="h-3 w-3 mr-1" />
+                            Verify
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    
+                    {/* Display verification results */}
+                    {verificationResults[stmt.id] && (
+                      <div className="mt-3 p-3 bg-muted rounded-md">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Badge 
+                            variant={
+                              verificationResults[stmt.id].status === 'VERIFIED' ? 'default' :
+                              verificationResults[stmt.id].status === 'DISPUTED' ? 'destructive' : 'secondary'
+                            }
+                          >
+                            {verificationResults[stmt.id].status}
+                          </Badge>
+                          <Badge variant="outline">
+                            {verificationResults[stmt.id].confidence} confidence
+                          </Badge>
+                        </div>
+                        
+                        {verificationResults[stmt.id].reasoning && (
+                          <p className="text-xs text-muted-foreground">
+                            {verificationResults[stmt.id].reasoning}
+                          </p>
+                        )}
+                        
+                        {verificationResults[stmt.id].issues && verificationResults[stmt.id].issues.length > 0 && (
+                          <div className="mt-2">
+                            <p className="text-xs font-medium">Issues Found:</p>
+                            <ul className="text-xs text-muted-foreground list-disc list-inside">
+                              {verificationResults[stmt.id].issues.map((issue: string, index: number) => (
+                                <li key={index}>{issue}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-muted-foreground">
+                No statements found. Add some statements first to enable fact verification.
+              </div>
+            )}
           </CardContent>
         </Card>
 

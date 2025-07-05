@@ -17,26 +17,13 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_ANON_KEY') ?? ''
     )
 
-    const { statementId } = await req.json()
+    // Instead of expecting a statementId, we now expect the statement directly
+    const { statement, speaker, sourceUrl, statementDate } = await req.json()
 
-    if (!statementId) {
+    if (!statement) {
       return new Response(
-        JSON.stringify({ error: 'Statement ID is required' }),
+        JSON.stringify({ error: 'Statement is required' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-      )
-    }
-
-    // Fetch the statement
-    const { data: statement, error: fetchError } = await supabase
-      .from('veritas_chain')
-      .select('*')
-      .eq('id', statementId)
-      .single()
-
-    if (fetchError || !statement) {
-      return new Response(
-        JSON.stringify({ error: 'Statement not found' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 404 }
       )
     }
 
@@ -52,10 +39,10 @@ serve(async (req) => {
     // Create verification prompt
     const prompt = `As a fact-checking expert, analyze this statement for accuracy:
 
-Statement: "${statement.statement}"
-Speaker: ${statement.speaker}
-Date: ${statement.statement_date || 'Unknown'}
-Source: ${statement.source_url || 'No source provided'}
+Statement: "${statement}"
+Speaker: ${speaker || 'Unknown'}
+Date: ${statementDate || 'Unknown'}
+Source: ${sourceUrl || 'No source provided'}
 
 Please provide:
 1. Verification Status: VERIFIED, UNVERIFIED, or DISPUTED
@@ -183,13 +170,65 @@ Format your response as JSON with these exact keys: status, confidence, keyFacts
       };
     }
 
-    console.log('Verification completed for statement:', statementId);
+    console.log('Verification completed for statement');
+
+    // Optionally store the verification result in the database
+    try {
+      if (statement && speaker) {
+        // Generate a simple hash for the statement
+        const statementHash = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(statement + speaker)
+        );
+        
+        // Convert hash to hex string
+        const hashArray = Array.from(new Uint8Array(statementHash));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        
+        // Get the last block to chain hashes
+        const { data: lastBlock } = await supabase
+          .from('veritas_chain')
+          .select('block_hash')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
+
+        const previousHash = lastBlock?.block_hash || '0';
+        
+        // Create block hash (combines statement hash with previous hash)
+        const blockHashData = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(hashHex + previousHash + Date.now().toString())
+        );
+        
+        // Convert block hash to hex string
+        const blockHashArray = Array.from(new Uint8Array(blockHashData));
+        const blockHash = blockHashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+        // Store in database with verification result
+        await supabase
+          .from('veritas_chain')
+          .insert({
+            statement,
+            speaker,
+            source_url: sourceUrl,
+            statement_date: statementDate,
+            statement_hash: hashHex,
+            previous_hash: previousHash,
+            block_hash: blockHash,
+            verification_status: verification.status,
+            verification_confidence: verification.confidence
+          });
+      }
+    } catch (dbError) {
+      // Just log the error, don't fail the request
+      console.error('Failed to store verification in database:', dbError);
+    }
 
     return new Response(
       JSON.stringify({
-        statementId,
-        statement: statement.statement,
-        speaker: statement.speaker,
+        statement,
+        speaker: speaker || 'Unknown',
         verification,
         timestamp: new Date().toISOString()
       }),

@@ -17,6 +17,10 @@ export default function Admin() {
   const [statementDate, setStatementDate] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [verificationResults, setVerificationResults] = useState<any>({})
+  const [directVerifyStatement, setDirectVerifyStatement] = useState('')
+  const [directVerifySpeaker, setDirectVerifySpeaker] = useState('')
+  const [directVerifySourceUrl, setDirectVerifySourceUrl] = useState('')
+  const [directVerifyDate, setDirectVerifyDate] = useState('')
   
   const queryClient = useQueryClient()
 
@@ -35,15 +39,25 @@ export default function Admin() {
     }
   })
 
-  // Mutation for verifying statements
+  // Mutation for verifying existing statements
   const verifyMutation = useMutation({
     mutationFn: async (statementId: string) => {
+      // Get the statement details
+      const statement = statements?.find(s => s.id === statementId)
+      if (!statement) throw new Error('Statement not found')
+      
+      // Call the updated verify-statement function with direct statement data
       const { data, error } = await supabase.functions.invoke('verify-statement', {
-        body: { statementId }
+        body: { 
+          statement: statement.statement,
+          speaker: statement.speaker,
+          sourceUrl: statement.source_url,
+          statementDate: statement.statement_date
+        }
       })
       
       if (error) throw error
-      return data
+      return { ...data, statementId }
     },
     onSuccess: (data) => {
       setVerificationResults(prev => ({
@@ -54,6 +68,29 @@ export default function Admin() {
     },
     onError: (error) => {
       console.error('Verification error:', error)
+      toast.error('Failed to verify statement')
+    }
+  })
+
+  // Mutation for direct verification without adding to database
+  const directVerifyMutation = useMutation({
+    mutationFn: async (data: { statement: string, speaker: string, sourceUrl?: string, statementDate?: string }) => {
+      const { data: result, error } = await supabase.functions.invoke('verify-statement', {
+        body: data
+      })
+      
+      if (error) throw error
+      return result
+    },
+    onSuccess: (data) => {
+      setVerificationResults(prev => ({
+        ...prev,
+        direct: data.verification
+      }))
+      toast.success('Direct verification completed!')
+    },
+    onError: (error) => {
+      console.error('Direct verification error:', error)
       toast.error('Failed to verify statement')
     }
   })
@@ -102,6 +139,22 @@ export default function Admin() {
     } finally {
       setIsSubmitting(false)
     }
+  }
+
+  const handleDirectVerify = async (e: React.FormEvent) => {
+    e.preventDefault()
+    
+    if (!directVerifyStatement.trim()) {
+      toast.error('Statement is required for verification')
+      return
+    }
+
+    directVerifyMutation.mutate({
+      statement: directVerifyStatement.trim(),
+      speaker: directVerifySpeaker.trim() || 'Unknown',
+      sourceUrl: directVerifySourceUrl.trim() || undefined,
+      statementDate: directVerifyDate || undefined
+    })
   }
 
   return (
@@ -199,6 +252,152 @@ export default function Admin() {
                 )}
               </Button>
             </form>
+          </CardContent>
+        </Card>
+
+        {/* Direct Verification Section */}
+        <Card className="shadow-lg mt-8">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5" />
+              Direct Statement Verification
+            </CardTitle>
+            <CardDescription>
+              Verify any statement directly using Mistral AI without adding it to the blockchain.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleDirectVerify} className="space-y-6">
+              <div className="space-y-2">
+                <Label htmlFor="directVerifyStatement" className="text-sm font-medium">
+                  Statement to Verify *
+                </Label>
+                <Textarea
+                  id="directVerifyStatement"
+                  placeholder="Enter any statement to verify..."
+                  value={directVerifyStatement}
+                  onChange={(e) => setDirectVerifyStatement(e.target.value)}
+                  className="min-h-24 resize-none"
+                  required
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="directVerifySpeaker" className="text-sm font-medium">
+                  Speaker
+                </Label>
+                <Input
+                  id="directVerifySpeaker"
+                  placeholder="Name of the person who made this statement (optional)"
+                  value={directVerifySpeaker}
+                  onChange={(e) => setDirectVerifySpeaker(e.target.value)}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="directVerifySourceUrl" className="text-sm font-medium">
+                  Source URL
+                </Label>
+                <Input
+                  id="directVerifySourceUrl"
+                  type="url"
+                  placeholder="https://example.com/article (optional)"
+                  value={directVerifySourceUrl}
+                  onChange={(e) => setDirectVerifySourceUrl(e.target.value)}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="directVerifyDate" className="text-sm font-medium">
+                  Statement Date
+                </Label>
+                <Input
+                  id="directVerifyDate"
+                  type="date"
+                  value={directVerifyDate}
+                  onChange={(e) => setDirectVerifyDate(e.target.value)}
+                />
+              </div>
+
+              <Button 
+                type="submit" 
+                className="w-full h-11"
+                disabled={directVerifyMutation.isPending}
+              >
+                {directVerifyMutation.isPending ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
+                    Verifying...
+                  </>
+                ) : (
+                  <>
+                    <Search className="h-4 w-4 mr-2" />
+                    Verify with Mistral AI
+                  </>
+                )}
+              </Button>
+            </form>
+
+            {/* Display direct verification results */}
+            {verificationResults.direct && (
+              <div className="mt-6 p-4 bg-muted rounded-md">
+                <div className="flex items-center gap-2 mb-2">
+                  <Badge 
+                    variant={
+                      verificationResults.direct.status === 'VERIFIED' ? 'default' :
+                      verificationResults.direct.status === 'DISPUTED' ? 'destructive' : 'secondary'
+                    }
+                  >
+                    {verificationResults.direct.status}
+                  </Badge>
+                  <Badge variant="outline">
+                    {verificationResults.direct.confidence} confidence
+                  </Badge>
+                </div>
+                
+                {verificationResults.direct.reasoning && (
+                  <p className="text-sm text-muted-foreground mt-2">
+                    {verificationResults.direct.reasoning}
+                  </p>
+                )}
+                
+                {verificationResults.direct.keyFacts && verificationResults.direct.keyFacts.length > 0 && (
+                  <div className="mt-4">
+                    <p className="text-sm font-medium">Key Facts:</p>
+                    <ul className="text-sm text-muted-foreground list-disc list-inside">
+                      {verificationResults.direct.keyFacts.map((fact: string, index: number) => (
+                        <li key={index}>{fact}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                
+                {verificationResults.direct.issues && verificationResults.direct.issues.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-sm font-medium">Issues Found:</p>
+                    <ul className="text-sm text-muted-foreground list-disc list-inside">
+                      {verificationResults.direct.issues.map((issue: string, index: number) => (
+                        <li key={index}>{issue}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                
+                {verificationResults.direct.context && (
+                  <div className="mt-2">
+                    <p className="text-sm font-medium">Additional Context:</p>
+                    <p className="text-sm text-muted-foreground">{verificationResults.direct.context}</p>
+                  </div>
+                )}
+                
+                {verificationResults.direct.recommendation && (
+                  <div className="mt-2">
+                    <p className="text-sm font-medium">Recommendation:</p>
+                    <p className="text-sm text-muted-foreground">{verificationResults.direct.recommendation}</p>
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
 

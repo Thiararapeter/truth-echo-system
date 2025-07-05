@@ -68,35 +68,109 @@ Please provide:
 Format your response as JSON with these exact keys: status, confidence, keyFacts, issues, context, recommendation, reasoning`
 
     // Call Mistral API
-    const aiResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${mistralApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'mistral-small-latest',
-        messages: [
-          { role: 'system', content: 'You are a professional fact-checker. Always respond with valid JSON only.' },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 1000,
-        temperature: 0.1
-      }),
-    })
-
-    if (!aiResponse.ok) {
-      console.error('Mistral API error:', await aiResponse.text())
-      throw new Error('Failed to get AI verification')
+    let aiResponse;
+    try {
+      aiResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${mistralApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'mistral-small-latest',
+          messages: [
+            { role: 'system', content: 'You are a professional fact-checker. Always respond with valid JSON only.' },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: 1000,
+          temperature: 0.1
+        }),
+      });
+    } catch (fetchError) {
+      console.error('Mistral API network error:', fetchError);
+      return new Response(
+        JSON.stringify({ 
+          error: 'Failed to connect to Mistral API', 
+          details: fetchError.message 
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 502 }
+      );
     }
 
-    const aiData = await aiResponse.json()
-    let verification
+    if (!aiResponse.ok) {
+      const errorText = await aiResponse.text();
+      let errorDetails;
+      
+      try {
+        // Try to parse error as JSON
+        errorDetails = JSON.parse(errorText);
+      } catch {
+        // If not JSON, use text as is
+        errorDetails = errorText;
+      }
+      
+      console.error('Mistral API error response:', errorDetails);
+      
+      return new Response(
+        JSON.stringify({ 
+          error: 'Mistral API returned an error', 
+          status: aiResponse.status,
+          details: errorDetails
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 502 }
+      );
+    }
 
+    let aiData;
+    try {
+      aiData = await aiResponse.json();
+    } catch (jsonError) {
+      console.error('Failed to parse Mistral API response as JSON:', jsonError);
+      return new Response(
+        JSON.stringify({ 
+          error: 'Invalid response from Mistral API', 
+          details: 'Response could not be parsed as JSON' 
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 502 }
+      );
+    }
+    
+    if (!aiData.choices || !aiData.choices[0] || !aiData.choices[0].message || !aiData.choices[0].message.content) {
+      console.error('Unexpected Mistral API response structure:', aiData);
+      return new Response(
+        JSON.stringify({ 
+          error: 'Unexpected response structure from Mistral API',
+          details: aiData
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 502 }
+      );
+    }
+
+    let verification;
     try {
       // Try to parse the AI response as JSON
-      verification = JSON.parse(aiData.choices[0].message.content)
+      verification = JSON.parse(aiData.choices[0].message.content);
+      
+      // Validate required fields
+      const requiredFields = ['status', 'confidence', 'keyFacts', 'issues', 'context', 'recommendation', 'reasoning'];
+      const missingFields = requiredFields.filter(field => !verification[field]);
+      
+      if (missingFields.length > 0) {
+        console.warn('Missing fields in verification response:', missingFields);
+        // Add missing fields with default values
+        missingFields.forEach(field => {
+          if (field === 'keyFacts' || field === 'issues') {
+            verification[field] = [];
+          } else {
+            verification[field] = field === 'status' ? 'UNVERIFIED' : 
+                                 field === 'confidence' ? 'LOW' : 
+                                 'Not provided';
+          }
+        });
+      }
+      
     } catch (parseError) {
+      console.error('Failed to parse AI content as JSON:', parseError);
       // Fallback to raw text if JSON parsing fails
       verification = {
         status: 'UNVERIFIED',
@@ -106,10 +180,10 @@ Format your response as JSON with these exact keys: status, confidence, keyFacts
         issues: ['AI response parsing failed'],
         context: '',
         recommendation: 'Manual review required'
-      }
+      };
     }
 
-    console.log('Verification completed for statement:', statementId)
+    console.log('Verification completed for statement:', statementId);
 
     return new Response(
       JSON.stringify({
@@ -120,13 +194,17 @@ Format your response as JSON with these exact keys: status, confidence, keyFacts
         timestamp: new Date().toISOString()
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    );
 
   } catch (error) {
-    console.error('Error in verify-statement function:', error)
+    console.error('Error in verify-statement function:', error);
     return new Response(
-      JSON.stringify({ error: 'Internal server error' }),
+      JSON.stringify({ 
+        error: 'Internal server error',
+        message: error.message,
+        stack: error.stack
+      }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-    )
+    );
   }
-})
+});

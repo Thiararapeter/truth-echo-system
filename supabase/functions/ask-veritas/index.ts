@@ -112,30 +112,120 @@ Instructions:
 - Be factual and objective
 - Keep your response concise but informative`
 
-    const aiResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${mistralApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'mistral-small-latest',
-        messages: [
-          { role: 'system', content: 'You are Veritas, a precise fact-checking assistant that only uses verified information from a trusted database.' },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 500,
-        temperature: 0.1
-      }),
-    })
-
-    if (!aiResponse.ok) {
-      console.error('Mistral API error:', await aiResponse.text())
-      throw new Error('Failed to get AI response')
+    let aiResponse;
+    try {
+      aiResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${mistralApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'mistral-small-latest',
+          messages: [
+            { role: 'system', content: 'You are Veritas, a precise fact-checking assistant that only uses verified information from a trusted database.' },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: 500,
+          temperature: 0.1
+        }),
+      });
+    } catch (fetchError) {
+      console.error('Mistral API network error:', fetchError);
+      // Fallback to basic response without AI
+      return new Response(
+        JSON.stringify({
+          answer: `I found relevant information but couldn't connect to the AI service. Here's what I found: ${relevantStatements.length} relevant statements about your query.`,
+          sources: relevantStatements.map(stmt => ({
+            statement: stmt.statement,
+            speaker: stmt.speaker,
+            date: stmt.statement_date,
+            source_url: stmt.source_url,
+            block_hash: stmt.block_hash
+          })),
+          confidence: 'low',
+          error: `API connection error: ${fetchError.message}`
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
-    const aiData = await aiResponse.json()
-    const answer = aiData.choices[0].message.content
+    if (!aiResponse.ok) {
+      const errorText = await aiResponse.text();
+      let errorDetails;
+      
+      try {
+        // Try to parse error as JSON
+        errorDetails = JSON.parse(errorText);
+      } catch {
+        // If not JSON, use text as is
+        errorDetails = errorText;
+      }
+      
+      console.error('Mistral API error response:', errorDetails);
+      
+      // Fallback to basic response without AI
+      return new Response(
+        JSON.stringify({
+          answer: `I found relevant information but encountered an error with the AI service. Here's what I found: ${relevantStatements.length} relevant statements about your query.`,
+          sources: relevantStatements.map(stmt => ({
+            statement: stmt.statement,
+            speaker: stmt.speaker,
+            date: stmt.statement_date,
+            source_url: stmt.source_url,
+            block_hash: stmt.block_hash
+          })),
+          confidence: 'low',
+          error: `API error (${aiResponse.status}): ${JSON.stringify(errorDetails)}`
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    let aiData;
+    try {
+      aiData = await aiResponse.json();
+    } catch (jsonError) {
+      console.error('Failed to parse Mistral API response as JSON:', jsonError);
+      // Fallback to basic response
+      return new Response(
+        JSON.stringify({
+          answer: `I found relevant information but received an invalid response from the AI service. Here's what I found: ${relevantStatements.length} relevant statements about your query.`,
+          sources: relevantStatements.map(stmt => ({
+            statement: stmt.statement,
+            speaker: stmt.speaker,
+            date: stmt.statement_date,
+            source_url: stmt.source_url,
+            block_hash: stmt.block_hash
+          })),
+          confidence: 'low',
+          error: 'Invalid API response format'
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    if (!aiData.choices || !aiData.choices[0] || !aiData.choices[0].message || !aiData.choices[0].message.content) {
+      console.error('Unexpected Mistral API response structure:', aiData);
+      // Fallback to basic response
+      return new Response(
+        JSON.stringify({
+          answer: `I found relevant information but received an unexpected response from the AI service. Here's what I found: ${relevantStatements.length} relevant statements about your query.`,
+          sources: relevantStatements.map(stmt => ({
+            statement: stmt.statement,
+            speaker: stmt.speaker,
+            date: stmt.statement_date,
+            source_url: stmt.source_url,
+            block_hash: stmt.block_hash
+          })),
+          confidence: 'low',
+          error: 'Unexpected API response structure'
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const answer = aiData.choices[0].message.content;
 
     return new Response(
       JSON.stringify({
@@ -150,13 +240,17 @@ Instructions:
         confidence: 'high'
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    );
 
   } catch (error) {
-    console.error('Error in ask-veritas function:', error)
+    console.error('Error in ask-veritas function:', error);
     return new Response(
-      JSON.stringify({ error: 'Internal server error' }),
+      JSON.stringify({ 
+        error: 'Internal server error',
+        message: error.message,
+        stack: error.stack
+      }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-    )
+    );
   }
-})
+});

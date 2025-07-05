@@ -48,6 +48,36 @@ export type Database = {
         }
         Relationships: []
       }
+      chat_history: {
+        Row: {
+          id: string
+          session_id: string
+          message_type: string
+          content: string
+          sources: any | null
+          confidence: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          session_id: string
+          message_type: string
+          content: string
+          sources?: any | null
+          confidence?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          session_id?: string
+          message_type?: string
+          content?: string
+          sources?: any | null
+          confidence?: string | null
+          created_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

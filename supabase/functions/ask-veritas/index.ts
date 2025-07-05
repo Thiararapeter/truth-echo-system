@@ -13,11 +13,6 @@ serve(async (req) => {
   }
 
   try {
-    const supabase = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? ''
-    )
-
     const { query } = await req.json()
 
     if (!query) {
@@ -38,138 +33,19 @@ serve(async (req) => {
       )
     }
 
-    // First, get all statements from the database to provide to Mistral
-    const { data: allStatements, error: fetchError } = await supabase
-      .from('veritas_chain')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50)  // Limit to recent statements to avoid token limits
-
-    if (fetchError) {
-      console.error('Error fetching statements:', fetchError)
-      return new Response(
-        JSON.stringify({ error: 'Failed to fetch statements from database' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-      )
-    }
-
-    if (!allStatements || allStatements.length === 0) {
-      return new Response(
-        JSON.stringify({ 
-          answer: "There are no statements in the Veritas database yet.",
-          sources: [],
-          confidence: 'low'
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Format statements for the AI
-    const statementsContext = allStatements.map(stmt => 
-      JSON.stringify({
-        id: stmt.id,
-        statement: stmt.statement,
-        speaker: stmt.speaker,
-        date: stmt.statement_date || 'Unknown',
-        source: stmt.source_url || 'No source provided',
-        block_hash: stmt.block_hash
-      })
-    ).join('\n')
-
-    // First Mistral API call to find relevant statements
-    let searchResponse;
-    try {
-      searchResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${mistralApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'mistral-small-latest',
-          messages: [
-            { 
-              role: 'system', 
-              content: 'You are a database search assistant. Your task is to find the most relevant statements from the database based on the user query. Return ONLY the IDs of the relevant statements as a JSON array with no additional text.' 
-            },
-            { 
-              role: 'user', 
-              content: `User query: "${query}"\n\nAvailable statements in database (each line is a JSON object):\n${statementsContext}\n\nReturn the IDs of the 3-5 most relevant statements as a JSON array like this: ["id1", "id2", "id3"]` 
-            }
-          ],
-          max_tokens: 500,
-          temperature: 0.1
-        }),
-      });
-    } catch (fetchError) {
-      console.error('Mistral API search error:', fetchError);
-      // Fallback to direct database search
-      return fallbackToDirectSearch(supabase, query, corsHeaders);
-    }
-
-    if (!searchResponse.ok) {
-      console.error('Mistral API search error:', await searchResponse.text());
-      // Fallback to direct database search
-      return fallbackToDirectSearch(supabase, query, corsHeaders);
-    }
-
-    const searchData = await searchResponse.json();
-    let relevantIds;
-
-    try {
-      // Extract the array of IDs from the AI response
-      const content = searchData.choices[0].message.content;
-      // Try to parse the content as JSON
-      relevantIds = JSON.parse(content);
-      
-      if (!Array.isArray(relevantIds)) {
-        throw new Error('Response is not an array');
-      }
-    } catch (parseError) {
-      console.error('Failed to parse relevant IDs:', parseError);
-      // Fallback to direct database search
-      return fallbackToDirectSearch(supabase, query, corsHeaders);
-    }
-
-    // Get the relevant statements based on the IDs
-    const { data: relevantStatements } = await supabase
-      .from('veritas_chain')
-      .select('*')
-      .in('id', relevantIds)
-      .limit(5);
-
-    if (!relevantStatements || relevantStatements.length === 0) {
-      return new Response(
-        JSON.stringify({ 
-          answer: "I couldn't find any relevant statements in the Veritas database for your query.",
-          sources: [],
-          confidence: 'low'
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    console.log('Found statements:', relevantStatements.length)
-
-    // Prepare context for AI
-    const context = relevantStatements.map(stmt => 
-      `Statement: "${stmt.statement}"\nSpeaker: ${stmt.speaker}\nDate: ${stmt.statement_date || 'Unknown'}\nSource: ${stmt.source_url || 'No source provided'}`
-    ).join('\n\n')
-
-    // Make request to Mistral AI for the answer
-    const prompt = `You are Veritas, a fact-checking assistant. Based on the following verified statements from our database, answer the user's query accurately and concisely.
-
-Context from Veritas Database:
-${context}
+    // Use Mistral AI directly without querying the database first
+    const prompt = `You are Veritas, a fact-checking assistant. A user has asked the following question:
 
 User Query: ${query}
 
-Instructions:
-- Only use information from the provided context
-- If the context doesn't contain relevant information, say so clearly
-- Cite the speaker and source when referencing statements
-- Be factual and objective
-- Keep your response concise but informative`
+Please provide a factual response that:
+1. Directly addresses the query with accurate information
+2. Cites sources where appropriate
+3. Indicates your confidence level in the answer (HIGH, MEDIUM, or LOW)
+4. Acknowledges any limitations or uncertainties
+5. Is objective and unbiased
+
+Your response should be informative, helpful, and factually accurate.`
 
     let aiResponse;
     try {
@@ -182,26 +58,19 @@ Instructions:
         body: JSON.stringify({
           model: 'mistral-small-latest',
           messages: [
-            { role: 'system', content: 'You are Veritas, a precise fact-checking assistant that only uses verified information from a trusted database.' },
+            { role: 'system', content: 'You are Veritas, a precise fact-checking assistant that provides accurate information based on verified facts.' },
             { role: 'user', content: prompt }
           ],
-          max_tokens: 500,
+          max_tokens: 800,
           temperature: 0.1
         }),
       });
     } catch (fetchError) {
       console.error('Mistral API network error:', fetchError);
-      // Fallback to basic response without AI
       return new Response(
         JSON.stringify({
-          answer: `I found relevant information but couldn't connect to the AI service. Here's what I found: ${relevantStatements.length} relevant statements about your query.`,
-          sources: relevantStatements.map(stmt => ({
-            statement: stmt.statement,
-            speaker: stmt.speaker,
-            date: stmt.statement_date,
-            source_url: stmt.source_url,
-            block_hash: stmt.block_hash
-          })),
+          answer: `I'm sorry, I couldn't connect to the fact-checking service. Please try again later.`,
+          sources: [],
           confidence: 'low',
           error: `API connection error: ${fetchError.message}`
         }),
@@ -223,17 +92,10 @@ Instructions:
       
       console.error('Mistral API error response:', errorDetails);
       
-      // Fallback to basic response without AI
       return new Response(
         JSON.stringify({
-          answer: `I found relevant information but encountered an error with the AI service. Here's what I found: ${relevantStatements.length} relevant statements about your query.`,
-          sources: relevantStatements.map(stmt => ({
-            statement: stmt.statement,
-            speaker: stmt.speaker,
-            date: stmt.statement_date,
-            source_url: stmt.source_url,
-            block_hash: stmt.block_hash
-          })),
+          answer: `I'm sorry, I encountered an error while fact-checking. Please try again later.`,
+          sources: [],
           confidence: 'low',
           error: `API error (${aiResponse.status}): ${JSON.stringify(errorDetails)}`
         }),
@@ -246,17 +108,10 @@ Instructions:
       aiData = await aiResponse.json();
     } catch (jsonError) {
       console.error('Failed to parse Mistral API response as JSON:', jsonError);
-      // Fallback to basic response
       return new Response(
         JSON.stringify({
-          answer: `I found relevant information but received an invalid response from the AI service. Here's what I found: ${relevantStatements.length} relevant statements about your query.`,
-          sources: relevantStatements.map(stmt => ({
-            statement: stmt.statement,
-            speaker: stmt.speaker,
-            date: stmt.statement_date,
-            source_url: stmt.source_url,
-            block_hash: stmt.block_hash
-          })),
+          answer: `I'm sorry, I received an invalid response from the fact-checking service. Please try again later.`,
+          sources: [],
           confidence: 'low',
           error: 'Invalid API response format'
         }),
@@ -266,17 +121,10 @@ Instructions:
     
     if (!aiData.choices || !aiData.choices[0] || !aiData.choices[0].message || !aiData.choices[0].message.content) {
       console.error('Unexpected Mistral API response structure:', aiData);
-      // Fallback to basic response
       return new Response(
         JSON.stringify({
-          answer: `I found relevant information but received an unexpected response from the AI service. Here's what I found: ${relevantStatements.length} relevant statements about your query.`,
-          sources: relevantStatements.map(stmt => ({
-            statement: stmt.statement,
-            speaker: stmt.speaker,
-            date: stmt.statement_date,
-            source_url: stmt.source_url,
-            block_hash: stmt.block_hash
-          })),
+          answer: `I'm sorry, I received an unexpected response from the fact-checking service. Please try again later.`,
+          sources: [],
           confidence: 'low',
           error: 'Unexpected API response structure'
         }),
@@ -285,18 +133,48 @@ Instructions:
     }
 
     const answer = aiData.choices[0].message.content;
+    
+    // Extract confidence level from the answer
+    let confidence = 'medium';
+    if (answer.includes('HIGH CONFIDENCE') || answer.includes('high confidence')) {
+      confidence = 'high';
+    } else if (answer.includes('LOW CONFIDENCE') || answer.includes('low confidence')) {
+      confidence = 'low';
+    }
+    
+    // Store the query and response in chat_history if needed
+    try {
+      const supabase = createClient(
+        Deno.env.get('SUPABASE_URL') ?? '',
+        Deno.env.get('SUPABASE_ANON_KEY') ?? ''
+      )
+      
+      // Optional: Store the query and response in chat_history
+      // This is useful for analytics but not required for functionality
+      await supabase.from('chat_history').insert({
+        session_id: 'system',
+        message_type: 'user',
+        content: query,
+        created_at: new Date().toISOString()
+      });
+      
+      await supabase.from('chat_history').insert({
+        session_id: 'system',
+        message_type: 'bot',
+        content: answer,
+        confidence: confidence,
+        created_at: new Date().toISOString()
+      });
+    } catch (dbError) {
+      // Just log the error, don't fail the request
+      console.error('Failed to store chat history:', dbError);
+    }
 
     return new Response(
       JSON.stringify({
         answer,
-        sources: relevantStatements.map(stmt => ({
-          statement: stmt.statement,
-          speaker: stmt.speaker,
-          date: stmt.statement_date,
-          source_url: stmt.source_url,
-          block_hash: stmt.block_hash
-        })),
-        confidence: 'high'
+        sources: [], // No sources from database since we're using direct API
+        confidence
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
@@ -313,78 +191,3 @@ Instructions:
     );
   }
 });
-
-// Fallback function for direct database search
-async function fallbackToDirectSearch(supabase, query, corsHeaders) {
-  console.log('Falling back to direct database search');
-  
-  // Search for relevant statements using text search
-  const { data: statements, error: searchError } = await supabase
-    .from('veritas_chain')
-    .select('*')
-    .textSearch('statement', query, { type: 'websearch' })
-    .limit(5);
-
-  if (searchError) {
-    console.error('Search error:', searchError);
-    // Fallback to simple word matching
-    const words = query.toLowerCase().split(' ').filter(word => word.length > 2);
-    const { data: fallbackStatements } = await supabase
-      .from('veritas_chain')
-      .select('*')
-      .or(words.map(word => `statement.ilike.%${word}%`).join(','))
-      .limit(5);
-    
-    if (!fallbackStatements || fallbackStatements.length === 0) {
-      return new Response(
-        JSON.stringify({ 
-          answer: "I couldn't find any relevant statements in the Veritas database for your query.",
-          sources: [],
-          confidence: 'low'
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-    
-    return new Response(
-      JSON.stringify({
-        answer: `Based on the Veritas database, I found ${fallbackStatements.length} relevant statement(s) that might answer your query.`,
-        sources: fallbackStatements.map(stmt => ({
-          statement: stmt.statement,
-          speaker: stmt.speaker,
-          date: stmt.statement_date,
-          source_url: stmt.source_url,
-          block_hash: stmt.block_hash
-        })),
-        confidence: 'medium'
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
-  }
-
-  if (!statements || statements.length === 0) {
-    return new Response(
-      JSON.stringify({ 
-        answer: "I couldn't find any relevant statements in the Veritas database for your query.",
-        sources: [],
-        confidence: 'low'
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
-  }
-
-  return new Response(
-    JSON.stringify({
-      answer: `Based on the Veritas database, I found ${statements.length} relevant statement(s) that might answer your query.`,
-      sources: statements.map(stmt => ({
-        statement: stmt.statement,
-        speaker: stmt.speaker,
-        date: stmt.statement_date,
-        source_url: stmt.source_url,
-        block_hash: stmt.block_hash
-      })),
-      confidence: 'medium'
-    }),
-    { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-  );
-}
